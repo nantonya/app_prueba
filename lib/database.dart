@@ -21,11 +21,21 @@ class BudgetDatabase {
     );
     final database = BudgetDatabase._(connection);
     await database._createSchema();
+    await database.seedMaterials();
     await database.seedDefaults();
     return database;
   }
 
   Future<void> _createSchema() async {
+    await _connection.execute('''
+      CREATE TABLE IF NOT EXISTS materials (
+        id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        unit TEXT NOT NULL,
+        price DOUBLE PRECISION NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    ''');
     await _connection.execute('''
       CREATE TABLE IF NOT EXISTS templates (
         id SERIAL PRIMARY KEY,
@@ -38,6 +48,8 @@ class BudgetDatabase {
       CREATE TABLE IF NOT EXISTS items (
         id SERIAL PRIMARY KEY,
         template_id INTEGER NOT NULL REFERENCES templates(id) ON DELETE CASCADE,
+        material_id INTEGER REFERENCES materials(id) ON DELETE SET NULL,
+        material_name TEXT,
         name TEXT NOT NULL,
         unit TEXT NOT NULL,
         quantity DOUBLE PRECISION NOT NULL,
@@ -45,6 +57,12 @@ class BudgetDatabase {
         labor DOUBLE PRECISION NOT NULL
       )
     ''');
+    await _connection.execute(
+      'ALTER TABLE items ADD COLUMN IF NOT EXISTS material_id INTEGER REFERENCES materials(id) ON DELETE SET NULL',
+    );
+    await _connection.execute(
+      'ALTER TABLE items ADD COLUMN IF NOT EXISTS material_name TEXT',
+    );
   }
 
   Future<void> seedDefaults() async {
@@ -119,6 +137,23 @@ class BudgetDatabase {
     );
   }
 
+  Future<void> seedMaterials() async {
+    final count = await _connection.execute('SELECT COUNT(*) FROM materials');
+    if ((count.first.first as int) > 0) return;
+    for (final material in const [
+      {'name': 'Clavo galvanizado', 'unit': 'kilogram', 'price': 38.00},
+      {'name': 'Tornillo por unidad', 'unit': 'unit', 'price': 4.50},
+      {'name': 'Canaleta galvanizada', 'unit': 'linearMeter', 'price': 9.40},
+      {'name': 'Lamina galvanizada', 'unit': 'squareMeter', 'price': 11.80},
+    ]) {
+      await insertMaterial(
+        name: material['name'] as String,
+        unit: material['unit'] as String,
+        price: material['price'] as double,
+      );
+    }
+  }
+
   Future<List<Map<String, dynamic>>> templates() async {
     final result = await _connection.execute(
       'SELECT id, name, description FROM templates ORDER BY id',
@@ -129,11 +164,32 @@ class BudgetDatabase {
   Future<List<Map<String, dynamic>>> itemsFor(int templateId) async {
     final result = await _connection.execute(
       Sql.named(
-        'SELECT id, name, unit, quantity, material, labor FROM items WHERE template_id = @id ORDER BY id',
+        'SELECT id, material_id, material_name, name, unit, quantity, material, labor FROM items WHERE template_id = @id ORDER BY id',
       ),
       parameters: {'id': templateId},
     );
     return result.map((row) => row.toColumnMap()).toList();
+  }
+
+  Future<List<Map<String, dynamic>>> materials() async {
+    final result = await _connection.execute(
+      'SELECT id, name, unit, price FROM materials ORDER BY name',
+    );
+    return result.map((row) => row.toColumnMap()).toList();
+  }
+
+  Future<int> insertMaterial({
+    required String name,
+    required String unit,
+    required double price,
+  }) async {
+    final result = await _connection.execute(
+      Sql.named(
+        'INSERT INTO materials (name, unit, price) VALUES (@name, @unit, @price) RETURNING id',
+      ),
+      parameters: {'name': name, 'unit': unit, 'price': price},
+    );
+    return result.first.first as int;
   }
 
   Future<int> insertTemplate({
@@ -152,9 +208,14 @@ class BudgetDatabase {
       for (final item in items) {
         await session.execute(
           Sql.named(
-            'INSERT INTO items (template_id, name, unit, quantity, material, labor) VALUES (@template, @name, @unit, @quantity, @material, @labor)',
+            'INSERT INTO items (template_id, material_id, material_name, name, unit, quantity, material, labor) VALUES (@template, @materialId, @materialName, @name, @unit, @quantity, @material, @labor)',
           ),
-          parameters: {...item, 'template': id},
+          parameters: {
+            ...item,
+            'template': id,
+            'materialId': item['materialId'],
+            'materialName': item['materialName'],
+          },
         );
       }
       return id;
@@ -168,10 +229,12 @@ class BudgetDatabase {
     required double quantity,
     required double material,
     required double labor,
+    int? materialId,
+    String? materialName,
   }) async {
     final result = await _connection.execute(
       Sql.named(
-        'INSERT INTO items (template_id, name, unit, quantity, material, labor) VALUES (@template, @name, @unit, @quantity, @material, @labor) RETURNING id',
+        'INSERT INTO items (template_id, material_id, material_name, name, unit, quantity, material, labor) VALUES (@template, @materialId, @materialName, @name, @unit, @quantity, @material, @labor) RETURNING id',
       ),
       parameters: {
         'template': templateId,
@@ -180,6 +243,8 @@ class BudgetDatabase {
         'quantity': quantity,
         'material': material,
         'labor': labor,
+        'materialId': materialId,
+        'materialName': materialName,
       },
     );
     return result.first.first as int;

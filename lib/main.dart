@@ -28,15 +28,17 @@ class BudgetApp extends StatelessWidget {
   }
 }
 
-enum Unit { squareMeter, linearMeter, unit }
+enum Unit { squareMeter, linearMeter, kilogram, unit }
 
 extension UnitText on Unit {
-  String get label => ['m²', 'm lineal', 'unidad'][index];
+  String get label => ['m²', 'm lineal', 'kg', 'unidad'][index];
 }
 
 class BudgetItem {
   BudgetItem({
     this.id,
+    this.materialId,
+    this.materialName,
     required this.name,
     required this.unit,
     required this.quantity,
@@ -44,12 +46,27 @@ class BudgetItem {
     required this.labor,
   });
   final int? id;
+  final int? materialId;
+  final String? materialName;
   final String name;
   final Unit unit;
   final double quantity;
   final double material;
   final double labor;
   double get total => quantity * (material + labor);
+}
+
+class CatalogMaterial {
+  CatalogMaterial({
+    required this.id,
+    required this.name,
+    required this.unit,
+    required this.price,
+  });
+  final int id;
+  final String name;
+  final Unit unit;
+  final double price;
 }
 
 class BudgetTemplate {
@@ -81,6 +98,7 @@ class _BudgetHomeState extends State<BudgetHome> {
   Object? loadError;
   int selected = 0;
   var templates = <BudgetTemplate>[];
+  var materials = <CatalogMaterial>[];
 
   @override
   void initState() {
@@ -92,6 +110,7 @@ class _BudgetHomeState extends State<BudgetHome> {
     try {
       final db = await BudgetDatabase.open();
       final rows = await db.templates();
+      final materialRows = await db.materials();
       final loaded = <BudgetTemplate>[];
       for (final row in rows) {
         final itemRows = await db.itemsFor(row['id'] as int);
@@ -111,6 +130,7 @@ class _BudgetHomeState extends State<BudgetHome> {
       setState(() {
         database = db;
         templates = loaded;
+        materials = materialRows.map(_materialFromRow).toList();
         selected =
             loaded.isEmpty ? 0 : selected.clamp(0, loaded.length - 1).toInt();
       });
@@ -127,11 +147,20 @@ class _BudgetHomeState extends State<BudgetHome> {
 
   BudgetItem _itemFromRow(Map<String, Object?> row) => BudgetItem(
     id: row['id'] as int,
+    materialId: row['material_id'] as int?,
+    materialName: row['material_name'] as String?,
     name: row['name'] as String,
     unit: Unit.values.firstWhere((unit) => unit.name == row['unit']),
     quantity: (row['quantity'] as num).toDouble(),
     material: (row['material'] as num).toDouble(),
     labor: (row['labor'] as num).toDouble(),
+  );
+
+  CatalogMaterial _materialFromRow(Map<String, dynamic> row) => CatalogMaterial(
+    id: row['id'] as int,
+    name: row['name'] as String,
+    unit: Unit.values.firstWhere((unit) => unit.name == row['unit']),
+    price: (row['price'] as num).toDouble(),
   );
 
   Future<void> _newTemplate() async {
@@ -162,7 +191,7 @@ class _BudgetHomeState extends State<BudgetHome> {
     if (database == null || templates.isEmpty) return;
     final item = await showDialog<BudgetItem>(
       context: context,
-      builder: (_) => const ItemDialog(),
+      builder: (_) => ItemDialog(materials: materials),
     );
     if (item == null) return;
     final id = await database!.insertItem(
@@ -172,16 +201,44 @@ class _BudgetHomeState extends State<BudgetHome> {
       quantity: item.quantity,
       material: item.material,
       labor: item.labor,
+      materialId: item.materialId,
+      materialName: item.materialName,
     );
     setState(
       () => current.items.add(
         BudgetItem(
           id: id,
+          materialId: item.materialId,
+          materialName: item.materialName,
           name: item.name,
           unit: item.unit,
           quantity: item.quantity,
           material: item.material,
           labor: item.labor,
+        ),
+      ),
+    );
+  }
+
+  Future<void> _newMaterial() async {
+    if (database == null) return;
+    final material = await showDialog<CatalogMaterial>(
+      context: context,
+      builder: (_) => const MaterialDialog(),
+    );
+    if (material == null) return;
+    final id = await database!.insertMaterial(
+      name: material.name,
+      unit: material.unit.name,
+      price: material.price,
+    );
+    setState(
+      () => materials.add(
+        CatalogMaterial(
+          id: id,
+          name: material.name,
+          unit: material.unit,
+          price: material.price,
         ),
       ),
     );
@@ -379,6 +436,12 @@ class _BudgetHomeState extends State<BudgetHome> {
                             onPressed: _newTemplate,
                             icon: const Icon(Icons.add),
                             label: const Text('Nueva plantilla'),
+                          ),
+                          const SizedBox(width: 8),
+                          OutlinedButton.icon(
+                            onPressed: _newMaterial,
+                            icon: const Icon(Icons.inventory_2_outlined),
+                            label: const Text('Nuevo material'),
                           ),
                         ],
                       ),
@@ -710,7 +773,8 @@ class _TemplateDialogState extends State<TemplateDialog> {
 }
 
 class ItemDialog extends StatefulWidget {
-  const ItemDialog({super.key});
+  const ItemDialog({required this.materials, super.key});
+  final List<CatalogMaterial> materials;
 
   @override
   State<ItemDialog> createState() => _ItemDialogState();
@@ -722,6 +786,7 @@ class _ItemDialogState extends State<ItemDialog> {
   final material = TextEditingController(text: '0');
   final labor = TextEditingController(text: '0');
   Unit unit = Unit.squareMeter;
+  CatalogMaterial? selectedMaterial;
 
   double number(TextEditingController controller) =>
       double.tryParse(controller.text.replaceAll(',', '.')) ?? 0;
@@ -750,6 +815,35 @@ class _ItemDialogState extends State<ItemDialog> {
               decoration: const InputDecoration(
                 labelText: 'Nombre de la partida',
               ),
+            ),
+            const SizedBox(height: 14),
+            DropdownButtonFormField<CatalogMaterial>(
+              value: selectedMaterial,
+              decoration: const InputDecoration(
+                labelText: 'Material del catalogo',
+              ),
+              hint: const Text('Selecciona un material o usa precio manual'),
+              items:
+                  widget.materials
+                      .map(
+                        (material) => DropdownMenuItem(
+                          value: material,
+                          child: Text(
+                            '${material.name} - ${material.price.toStringAsFixed(2)} / ${material.unit.label}',
+                          ),
+                        ),
+                      )
+                      .toList(),
+              onChanged: (value) {
+                setState(() {
+                  selectedMaterial = value;
+                  if (value != null) {
+                    name.text = value.name;
+                    unit = value.unit;
+                    material.text = value.price.toStringAsFixed(2);
+                  }
+                });
+              },
             ),
             const SizedBox(height: 14),
             Row(
@@ -787,6 +881,7 @@ class _ItemDialogState extends State<ItemDialog> {
                   child: TextField(
                     controller: material,
                     keyboardType: TextInputType.number,
+                    readOnly: selectedMaterial != null,
                     decoration: const InputDecoration(
                       labelText: 'Material / unidad',
                     ),
@@ -820,10 +915,108 @@ class _ItemDialogState extends State<ItemDialog> {
             context,
             BudgetItem(
               name: name.text.trim(),
+              materialId: selectedMaterial?.id,
+              materialName: selectedMaterial?.name,
               unit: unit,
               quantity: number(quantity),
               material: number(material),
               labor: number(labor),
+            ),
+          );
+        },
+        child: const Text('Guardar'),
+      ),
+    ],
+  );
+}
+
+class MaterialDialog extends StatefulWidget {
+  const MaterialDialog({super.key});
+
+  @override
+  State<MaterialDialog> createState() => _MaterialDialogState();
+}
+
+class _MaterialDialogState extends State<MaterialDialog> {
+  final name = TextEditingController();
+  final price = TextEditingController(text: '0');
+  Unit unit = Unit.squareMeter;
+
+  double number(String value) =>
+      double.tryParse(value.replaceAll(',', '.')) ?? 0;
+
+  @override
+  void dispose() {
+    name.dispose();
+    price.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: const Text('Nuevo material'),
+    content: SizedBox(
+      width: 430,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          TextField(
+            controller: name,
+            autofocus: true,
+            decoration: const InputDecoration(
+              labelText: 'Nombre',
+              hintText: 'Ej. Clavo galvanizado',
+            ),
+          ),
+          const SizedBox(height: 14),
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: price,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(
+                    labelText: 'Precio de compra',
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: DropdownButtonFormField<Unit>(
+                  value: unit,
+                  decoration: const InputDecoration(labelText: 'Se compra por'),
+                  items:
+                      Unit.values
+                          .map(
+                            (value) => DropdownMenuItem(
+                              value: value,
+                              child: Text(value.label),
+                            ),
+                          )
+                          .toList(),
+                  onChanged: (value) => setState(() => unit = value!),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.pop(context),
+        child: const Text('Cancelar'),
+      ),
+      FilledButton(
+        onPressed: () {
+          if (name.text.trim().isEmpty || number(price.text) <= 0) return;
+          Navigator.pop(
+            context,
+            CatalogMaterial(
+              id: 0,
+              name: name.text.trim(),
+              unit: unit,
+              price: number(price.text),
             ),
           );
         },
